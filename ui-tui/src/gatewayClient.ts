@@ -338,6 +338,34 @@ export class GatewayClient extends EventEmitter {
     this.proc = spawn(python, ['-m', 'tui_gateway.entry'], { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] })
     this.lifecycle(`[lifecycle] spawned gateway child ${describeChild(this.proc)} python=${python} cwd=${cwd}`)
 
+    // DEBUG: trace pipe lifecycle to diagnose silent stdin EOF
+    const stdinW = this.proc.stdin!
+    const stdoutR = this.proc.stdout!
+    const stderrR = this.proc.stderr!
+    const self = this
+    stdinW.on('close', () => self.lifecycle(`[debug] stdin writable CLOSED ${describeChild(self.proc)} writableLength=${stdinW.writableLength} destroyed=${stdinW.destroyed}`))
+    stdinW.on('error', (e: Error) => self.lifecycle(`[debug] stdin writable ERROR ${describeChild(self.proc)}: ${e.message}`))
+    stdinW.on('finish', () => self.lifecycle(`[debug] stdin writable FINISH (all data flushed) ${describeChild(self.proc)}`))
+    stdinW.on('pipe', () => self.lifecycle(`[debug] stdin writable PIPE event ${describeChild(self.proc)}`))
+    stdinW.on('unpipe', () => self.lifecycle(`[debug] stdin writable UNPIPE event ${describeChild(self.proc)}`))
+    stdoutR.on('close', () => self.lifecycle(`[debug] stdout readable CLOSED ${describeChild(self.proc)} readableLength=${stdoutR.readableLength} destroyed=${stdoutR.destroyed}`))
+    stdoutR.on('error', (e: Error) => self.lifecycle(`[debug] stdout readable ERROR ${describeChild(self.proc)}: ${e.message}`))
+    stdoutR.on('end', () => self.lifecycle(`[debug] stdout readable END (child stopped writing) ${describeChild(self.proc)}`))
+    stderrR.on('close', () => self.lifecycle(`[debug] stderr readable CLOSED ${describeChild(self.proc)}`))
+
+    // Wrap stdin.write to catch write failures before they propagate
+    const origWrite = stdinW.write.bind(stdinW) as (...a: any[]) => any
+    let writeSeq = 0
+    const debugWrite = (...args: any[]) => {
+      const seq = ++writeSeq
+      const result = origWrite(...args)
+      if (!result) {
+        self.lifecycle(`[debug] stdin write#${seq} returned false (backpressure) ${describeChild(self.proc)}`)
+      }
+      return result
+    }
+    stdinW.write = debugWrite as typeof stdinW.write
+
     this.stdoutRl = createInterface({ input: this.proc.stdout! })
     this.stdoutRl.on('line', raw => {
       try {
